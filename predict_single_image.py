@@ -52,16 +52,10 @@ def prepare_batch(image, ijk_patch_indices):
     return image_batches
 
 
-# inference single image
-def inference(write_image, model, image_path, label_path, result_path, resample, resolution, patch_size_x, patch_size_y, patch_size_z, stride_inplane, stride_layer, batch_size=1, segmentation=True):
-
+def inferenceFast(write_image, model, image_path, label_path, result_path, isResize, size, segmentation=True):
     # create transformations to image and labels
-    transforms1 = [
-        NiftiDataset.Resample(resolution, resample)
-    ]
-
-    transforms2 = [
-        NiftiDataset.Padding((patch_size_x, patch_size_y, patch_size_z))
+    transforms = [
+        NiftiDataset.Resize(size, isResize)
     ]
 
     # read image file
@@ -84,19 +78,10 @@ def inference(write_image, model, image_path, label_path, result_path, resample,
 
     sample = {'image': image, 'label': label_tfm}
 
-    for transform in transforms1:
+    for transform in transforms:
         sample = transform(sample)
-
-    # keeping track on how much padding will be performed before the inference
-    image_array = sitk.GetArrayFromImage(sample['image'])
-    pad_x = patch_size_x - (patch_size_x - image_array.shape[2])
-    pad_y = patch_size_x - (patch_size_y - image_array.shape[1])
-    pad_z = patch_size_z - (patch_size_z - image_array.shape[0])
 
     image_pre_pad = sample['image']
-
-    for transform in transforms2:
-        sample = transform(sample)
 
     image_tfm, label_tfm = sample['image'], sample['label']
 
@@ -118,85 +103,21 @@ def inference(write_image, model, image_path, label_path, result_path, resample,
     if (image_np.shape[2] % 2) == 0:
         Padding = False
     else:
-        image_np = np.pad(image_np, ((0,0), (0,0), (0, 1)), 'edge')
+        image_np = np.pad(image_np, ((0, 0), (0, 0), (0, 1)), 'edge')
         label_np = np.pad(label_np, ((0, 0), (0, 0), (0, 1)), 'edge')
         Padding = True
 
-    # ------------------------------------------------------------------------------------------------
-
-    # a weighting matrix will be used for averaging the overlapped region
-    weight_np = np.zeros(label_np.shape)
-
-    # prepare image batch indices
-    inum = int(math.ceil((image_np.shape[0] - patch_size_x) / float(stride_inplane))) + 1
-    jnum = int(math.ceil((image_np.shape[1] - patch_size_y) / float(stride_inplane))) + 1
-    knum = int(math.ceil((image_np.shape[2] - patch_size_z) / float(stride_layer))) + 1
-
-    patch_total = 0
-    ijk_patch_indices = []
-    ijk_patch_indicies_tmp = []
-
-    for i in range(inum):
-        for j in range(jnum):
-            for k in range(knum):
-                if patch_total % batch_size == 0:
-                    ijk_patch_indicies_tmp = []
-
-                istart = i * stride_inplane
-                if istart + patch_size_x > image_np.shape[0]:  # for last patch
-                    istart = image_np.shape[0] - patch_size_x
-                iend = istart + patch_size_x
-
-                jstart = j * stride_inplane
-                if jstart + patch_size_y > image_np.shape[1]:  # for last patch
-                    jstart = image_np.shape[1] - patch_size_y
-                jend = jstart + patch_size_y
-
-                kstart = k * stride_layer
-                if kstart + patch_size_z > image_np.shape[2]:  # for last patch
-                    kstart = image_np.shape[2] - patch_size_z
-                kend = kstart + patch_size_z
-
-                ijk_patch_indicies_tmp.append([istart, iend, jstart, jend, kstart, kend])
-
-                if patch_total % batch_size == 0:
-                    ijk_patch_indices.append(ijk_patch_indicies_tmp)
-
-                patch_total += 1
-
-    batches = prepare_batch(image_np, ijk_patch_indices)
-
-    for i in tqdm(range(len(batches))):
-        batch = batches[i]
-
-        batch = torch.from_numpy(batch[np.newaxis, :, :, :])
-        batch = Variable(batch.cuda())
-
-        pred = model(batch)
-        pred = pred.squeeze().data.cpu().numpy()
-
-        istart = ijk_patch_indices[i][0][0]
-        iend = ijk_patch_indices[i][0][1]
-        jstart = ijk_patch_indices[i][0][2]
-        jend = ijk_patch_indices[i][0][3]
-        kstart = ijk_patch_indices[i][0][4]
-        kend = ijk_patch_indices[i][0][5]
-        label_np[istart:iend, jstart:jend, kstart:kend] += pred[:, :, :]
-        weight_np[istart:iend, jstart:jend, kstart:kend] += 1.0
-
-    print("{}: Evaluation complete".format(datetime.datetime.now()))
-    # eliminate overlapping region using the weighted value
-    label_np = (np.float32(label_np) / np.float32(weight_np) + 0.01)
+    input = torch.from_numpy(image_np).unsqueeze(0).unsqueeze(0).cuda()
+    pred = model(input).squeeze().data.cpu().numpy()
+    label_np[:, :, :] = pred[:, :, :]
 
     if segmentation is True:
         label_np = abs(np.around(label_np))
 
     # removed the 1 pad on z
     if Padding is True:
-        label_np = label_np[:, :, 0:(label_np.shape[2]-1)]
+        label_np = label_np[:, :, 0:(label_np.shape[2] - 1)]
 
-    # removed all the padding
-    label_np = label_np[:pad_x, :pad_y, :pad_z]
 
     # convert back to sitk space
     label = from_numpy_to_itk(label_np, image_pre_pad)
@@ -205,12 +126,12 @@ def inference(write_image, model, image_path, label_path, result_path, resample,
     # save label
     writer = sitk.ImageFileWriter()
 
-    if resample is True:
+    if isResize is True:
 
-        print("{}: Resampling label back to original image space...".format(datetime.datetime.now()))
+        print("{}: Resize label back to original image space...".format(datetime.datetime.now()))
         # label = resample_sitk_image(label, spacing=image.GetSpacing(), interpolator='bspline')   # keep this commented
         if segmentation is True:
-            label = resize(label, (sitk.GetArrayFromImage(image)).shape[::-1], sitk.sitkLinear)
+            label = resize(label, (sitk.GetArrayFromImage(image)).shape[::-1], sitk.sitkNearestNeighbor)
             label_array = np.around(sitk.GetArrayFromImage(label))
             label = sitk.GetImageFromArray(label_array)
             label.SetDirection(image.GetDirection())
@@ -227,16 +148,17 @@ def inference(write_image, model, image_path, label_path, result_path, resample,
         label = label
 
     if label_path is not None and segmentation is True:
-
         reader = sitk.ImageFileReader()
         reader.SetFileName(label_path)
         true_label = reader.Execute()
 
         true_label = sitk.GetArrayFromImage(true_label)
         predicted = sitk.GetArrayFromImage(label)
-
-        dice = dice_coeff(predicted,true_label)
-
+        try:
+            dice = dice_coeff(predicted, true_label)
+        except:
+            print(label_path)
+            raise Exception()
 
     writer.SetFileName(result_path)
     if write_image is True:
@@ -249,21 +171,22 @@ def inference(write_image, model, image_path, label_path, result_path, resample,
         return label, dice
 
     else:
-        dice = None
+        dice = -1
         return label, dice
 
 
-if __name__ == "__main__":
 
-    if args.multi_gpu is True:
-        os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu_id  # Multi-gpu selector for training
-        net = torch.nn.DataParallel((UNet(residual='pool')).cuda())  # load the network Unet
-
-    else:
-        torch.cuda.set_device(args.gpu_id)
-        net = UNet(residual='pool').cuda()
-
-    net.load_state_dict(torch.load(args.weights))
-
-    result, dice = inference(True, net, args.image, None, args.result, args.resample, args.new_resolution,
-                       args.patch_size[0],args.patch_size[1],args.patch_size[2], args.stride_inplane, args.stride_layer, segmentation=True)
+# if __name__ == "__main__":
+#
+#     if args.multi_gpu is True:
+#         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu_id  # Multi-gpu selector for training
+#         net = torch.nn.DataParallel((UNet(residual='pool')).cuda())  # load the network Unet
+#
+#     else:
+#         torch.cuda.set_device(args.gpu_id)
+#         net = UNet(residual='pool').cuda()
+#
+#     net.load_state_dict(torch.load(args.weights))
+#
+#     result, dice = inference(True, net, args.image, None, args.result, args.resample, args.new_resolution,
+#                        args.patch_size[0],args.patch_size[1],args.patch_size[2], args.stride_inplane, args.stride_layer, segmentation=True)

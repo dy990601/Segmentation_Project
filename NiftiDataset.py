@@ -9,22 +9,72 @@ from sklearn.model_selection import train_test_split
 import scipy
 import torch
 import torch.utils.data
-
+import torch.nn.functional as F
+from skimage import measure
+# import natsort as ns
+import pandas as pd
 
 # ------- Swithes -------
 
-interpolator_image = sitk.sitkLinear                 # interpolator image
-interpolator_label = sitk.sitkLinear                  # interpolator label
+interpolator_image = sitk.sitkLinear  # interpolator image
+interpolator_label = sitk.sitkLinear  # interpolator label
 
-_interpolator_image = 'linear'          # interpolator image
-_interpolator_label = 'linear'          # interpolator label
+_interpolator_image = 'linear'  # interpolator image
+_interpolator_label = 'nearest'  # interpolator label
 
-Segmentation = True
+Segmentation = False
+
 
 # ------------------------------------- Functions ---------------------------------------
 
 
+# def create_list(data_path):
+#     """
+#     this function is create the data list and the data is set as follow:
+#     --data
+#         --data_1
+#             image.nii
+#             label.nii
+#         --data_2
+#             image.nii
+#             label.nii
+#         ...
+#     if u use your own data, u can rewrite this function
+#     """
+#     data_list = glob.glob(os.path.join(data_path, '*'))
+#
+#     label_name = 'T2_label.nii.gz'
+#     data_name = 'T2.nii'
+#
+#     data_list = ns.natsorted(data_list)
+#     list_all = [{'data': os.path.join(path, data_name),
+#                  'label': os.path.join(path, label_name)} for path in data_list]
+#
+#     return list_all
+
 def create_list(data_path):
+    """
+    this function is create the data list and the data is set as follow:
+    --train
+        --data
+            --volume_1.nii.gz
+            --volume_2.nii.gz
+        --label
+            --segmentation_1.nii.gz
+            --segmentation_2.nii.gz
+        ...
+    if u use your own data, u can rewrite this function
+    """
+    path = [os.path.join(data_path, p) for p in os.listdir(data_path)]
+    data_name = os.listdir(path[0])
+    label_name = os.listdir(path[1])
+    list_all = [{'data': os.path.join(path[0], data_name[i]),
+                 'label': os.path.join(path[1], label_name[i])} for i in range(len(data_name))]
+    return list_all
+
+
+def create_list_regression(data_path, label_path):
+    pass
     """
     this function is create the data list and the data is set as follow:
     --data
@@ -37,15 +87,22 @@ def create_list(data_path):
         ...
     if u use your own data, u can rewrite this function
     """
-    data_list = glob.glob(os.path.join(data_path, '*'))
-
-    label_name = 'label.nii'
-    data_name = 'image.nii'
-
-    data_list.sort()
-    list_all = [{'data': os.path.join(path, data_name), 'label': os.path.join(path, label_name)} for path in data_list]
-
-    return list_all
+    # data_label = pd.read_excel(label_path)
+    # label_dict = pd.Series(data_label.PFS_LEVEL.values, index=data_label.NUM).to_dict()
+    #
+    # data_list = glob.glob(os.path.join(data_path, '*'))
+    #
+    # T1_name = 'T1_loc.nii'
+    # T1c_name = 'T1c_loc.nii'
+    # T2_name = 'T2_loc.nii'
+    #
+    # data_list = ns.natsorted(data_list)
+    # list_all = [{'T1': os.path.join(path, T1_name),
+    #              'T1c': os.path.join(path, T1c_name),
+    #              'T2': os.path.join(path, T2_name),
+    #              'PFS_LEVEL': label_dict[int(os.path.split(path)[-1])]} for path in data_list]
+    #
+    # return list_all
 
 
 def resize(img, new_size, interpolator):
@@ -92,6 +149,35 @@ def resize(img, new_size, interpolator):
     # no new labels are introduced.
 
     return sitk.Resample(img, reference_image, centered_transform, interpolator, 0.0)
+
+
+def resize_image_itk(itkimage, newSize, interpolator):
+    _SITK_INTERPOLATOR_DICT = {
+        'nearest': sitk.sitkNearestNeighbor,
+        'linear': sitk.sitkLinear,
+        'gaussian': sitk.sitkGaussian,
+        'label_gaussian': sitk.sitkLabelGaussian,
+        'bspline': sitk.sitkBSpline,
+        'hamming_sinc': sitk.sitkHammingWindowedSinc,
+        'cosine_windowed_sinc': sitk.sitkCosineWindowedSinc,
+        'welch_windowed_sinc': sitk.sitkWelchWindowedSinc,
+        'lanczos_windowed_sinc': sitk.sitkLanczosWindowedSinc
+    }
+
+    resampler = sitk.ResampleImageFilter()
+    originSize = itkimage.GetSize()  # 原来的体素块尺寸
+    originSpacing = itkimage.GetSpacing()
+    newSize = np.array(newSize, float)
+    factor = originSize / newSize
+    newSpacing = originSpacing * factor
+    newSize = newSize.astype(np.int)  # spacing肯定不能是整数
+    resampler.SetReferenceImage(itkimage)  # 需要重新采样的目标图像
+    resampler.SetSize(newSize.tolist())
+    resampler.SetOutputSpacing(newSpacing.tolist())
+    resampler.SetTransform(sitk.Transform(3, sitk.sitkIdentity))
+    resampler.SetInterpolator(_SITK_INTERPOLATOR_DICT[interpolator])
+    itkimgResampled = resampler.Execute(itkimage)  # 得到重新采样后的图像
+    return itkimgResampled
 
 
 def resample_sitk_image(sitk_image, spacing=None, interpolator=None, fill_value=0):
@@ -242,25 +328,25 @@ def rotation3d_image(image, theta_x, theta_y, theta_z):
 
 
 def rotation3d_label(image, theta_x, theta_y, theta_z):
-   """
-   This function rotates an image across each of the x, y, z axes by theta_x, theta_y, and theta_z degrees
-   respectively
-   :param image: An sitk MRI image
-   :param theta_x: The amount of degrees the user wants the image rotated around the x axis
-   :param theta_y: The amount of degrees the user wants the image rotated around the y axis
-   :param theta_z: The amount of degrees the user wants the image rotated around the z axis
-   :param show: Boolean, whether or not the user wants to see the result of the rotation
-   :return: The rotated image
-   """
-   theta_x = np.deg2rad(theta_x)
-   theta_y = np.deg2rad(theta_y)
-   theta_z = np.deg2rad(theta_z)
-   euler_transform = sitk.Euler3DTransform(get_center(image), theta_x, theta_y, theta_z, (0, 0, 0))
-   image_center = get_center(image)
-   euler_transform.SetCenter(image_center)
-   euler_transform.SetRotation(theta_x, theta_y, theta_z)
-   resampled_image = resample_label(image, euler_transform)
-   return resampled_image
+    """
+    This function rotates an image across each of the x, y, z axes by theta_x, theta_y, and theta_z degrees
+    respectively
+    :param image: An sitk MRI image
+    :param theta_x: The amount of degrees the user wants the image rotated around the x axis
+    :param theta_y: The amount of degrees the user wants the image rotated around the y axis
+    :param theta_z: The amount of degrees the user wants the image rotated around the z axis
+    :param show: Boolean, whether or not the user wants to see the result of the rotation
+    :return: The rotated image
+    """
+    theta_x = np.deg2rad(theta_x)
+    theta_y = np.deg2rad(theta_y)
+    theta_z = np.deg2rad(theta_z)
+    euler_transform = sitk.Euler3DTransform(get_center(image), theta_x, theta_y, theta_z, (0, 0, 0))
+    image_center = get_center(image)
+    euler_transform.SetCenter(image_center)
+    euler_transform.SetRotation(theta_x, theta_y, theta_z)
+    resampled_image = resample_label(image, euler_transform)
+    return resampled_image
 
 
 def flipit(image, axes):
@@ -357,8 +443,7 @@ def translateit(image, offset, isseg=False):
     return img
 
 
-def imadjust(image,gamma=np.random.uniform(1, 2)):
-
+def imadjust(image, gamma=np.random.uniform(1, 2)):
     array = np.transpose(sitk.GetArrayFromImage(image), axes=(2, 1, 0))
     spacing = image.GetSpacing()
     direction = image.GetDirection()
@@ -373,7 +458,79 @@ def imadjust(image,gamma=np.random.uniform(1, 2)):
 
     return img
 
+
 # --------------------------------------------------------------------------------------
+
+
+class MyDataSet(torch.utils.data.Dataset):
+
+    def __init__(self, data_list, transforms=None, train=False, test=False):
+        # Init membership variables
+        self.data_list = data_list
+        self.transforms = transforms
+        self.train = train
+        self.test = test
+        self.bit = sitk.sitkFloat32
+
+    def read_image(self, path):
+        reader = sitk.ImageFileReader()
+        reader.SetFileName(path)
+        image = reader.Execute()
+        return image
+
+    def __getitem__(self, item):
+        # item = 0
+        data_dict = self.data_list[item]
+        T1_path = data_dict["T1"]
+        T1c_path = data_dict["T1c"]
+        T2_path = data_dict["T2"]
+        PFS_LEVEL = data_dict["PFS_LEVEL"]
+
+        # read image and label
+        T1_image = self.read_image(T1_path)
+        T1c_image = self.read_image(T1c_path)
+        T2_image = self.read_image(T2_path)
+
+        T1_image = Normalization(T1_image)  # set intensity 0-255
+        T1c_image = Normalization(T1c_image)  # set intensity 0-255
+        T2_image = Normalization(T2_image)  # set intensity 0-255
+
+        # cast image and label
+        castImageFilter = sitk.CastImageFilter()
+        castImageFilter.SetOutputPixelType(self.bit)
+        T1_image = castImageFilter.Execute(T1_image)
+        T1c_image = castImageFilter.Execute(T1c_image)
+        T2_image = castImageFilter.Execute(T2_image)
+
+        sample = {'T1': T1_image, 'T1c': T1c_image, "T2": T2_image}
+
+        if self.transforms:  # apply the transforms to image and label (normalization, resampling, patches)
+            for transform in self.transforms:
+                sample = transform(sample)
+
+        # convert sample to tf tensors
+        T1_image_np = sitk.GetArrayFromImage(sample['T1'])
+        T1c_image_np = sitk.GetArrayFromImage(sample['T1c'])
+        T2_image_np = sitk.GetArrayFromImage(sample['T2'])
+
+        # to unify matrix dimension order between SimpleITK([x,y,z]) and numpy([z,y,x])  (actually it´s the contrary)
+        T1_image_np = np.transpose(T1_image_np, (2, 1, 0))
+        T1c_image_np = np.transpose(T1c_image_np, (2, 1, 0))
+        T2_image_np = np.transpose(T2_image_np, (2, 1, 0))
+
+        T1_image_np = T1_image_np[np.newaxis, :, :, :]
+        T1c_image_np = T1c_image_np[np.newaxis, :, :, :]
+        T2_image_np = T2_image_np[np.newaxis, :, :, :]
+
+        # print(T1_image_np.shape)
+        # print(PFS_LEVEL, type(PFS_LEVEL))
+
+        return torch.cat((torch.from_numpy(T1_image_np),
+                          torch.from_numpy(T1c_image_np),
+                          torch.from_numpy(T2_image_np)), dim=0), torch.tensor(PFS_LEVEL)
+
+    def __len__(self):
+        return len(self.data_list)
 
 
 class NifitDataSet(torch.utils.data.Dataset):
@@ -381,7 +538,7 @@ class NifitDataSet(torch.utils.data.Dataset):
     def __init__(self, data_list,
                  transforms=None,
                  train=False,
-                 test=False,):
+                 test=False, ):
 
         # Init membership variables
         self.data_list = data_list
@@ -467,6 +624,106 @@ class NifitDataSet(torch.utils.data.Dataset):
         image_np = image_np[np.newaxis, :, :, :]
         label_np = label_np[np.newaxis, :, :, :]
 
+        # print(image_np.shape, label_np.shape)
+
+        return torch.from_numpy(image_np), torch.from_numpy(label_np)  # this is the final output to feed the network
+
+    def __len__(self):
+        return len(self.data_list)
+
+class MyNifitDataSet(torch.utils.data.Dataset):
+
+    def __init__(self, data_list,
+                 transforms=None,
+                 train=False,
+                 test=False, ):
+
+        # Init membership variables
+        self.data_list = data_list
+        self.transforms = transforms
+        self.train = train
+        self.test = test
+        self.bit = sitk.sitkFloat32
+
+        """
+        the dataset class receive a list that contain the data item, and each item
+        is a dict with two item include data path and label path. as follow:
+        data_list = [
+        {
+        "data":　data_path_1,
+        "label": label_path_1,
+        },
+        {
+        "data": data_path_2,
+        "label": label_path_2,
+        }
+        ...
+        ]
+        """
+
+    def read_image(self, path):
+        reader = sitk.ImageFileReader()
+        reader.SetFileName(path)
+        image = reader.Execute()
+        return image
+
+    def __getitem__(self, item):
+
+        data_dict = self.data_list[item]
+        data_path = data_dict["data"]
+        label_path = data_dict["label"]
+
+        # read image and label
+        image = self.read_image(data_path)
+
+        image = Normalization(image)  # set intensity 0-255
+
+        # cast image and label
+        castImageFilter = sitk.CastImageFilter()
+        castImageFilter.SetOutputPixelType(self.bit)
+        image = castImageFilter.Execute(image)
+
+        if self.train:
+            label = self.read_image(label_path)
+            # if Segmentation is False:
+            label = Normalization(label)  # set intensity 0-255
+            castImageFilter.SetOutputPixelType(self.bit)
+            label = castImageFilter.Execute(label)
+
+        elif self.test:
+            label = self.read_image(label_path)
+            # if Segmentation is False:
+            label = Normalization(label)  # set intensity 0-255
+            castImageFilter.SetOutputPixelType(self.bit)
+            label = castImageFilter.Execute(label)
+
+        else:
+            label = sitk.Image(image.GetSize(), self.bit)
+            label.SetOrigin(image.GetOrigin())
+            label.SetSpacing(image.GetSpacing())
+
+        sample = {'image': image, 'label': label}
+
+        if self.transforms:  # apply the transforms to image and label (normalization, resampling, patches)
+            for transform in self.transforms:
+                sample = transform(sample)
+
+        # convert sample to tf tensors
+        image_np = sitk.GetArrayFromImage(sample['image'])
+        label_np = sitk.GetArrayFromImage(sample['label'])
+
+        if Segmentation is True:
+            label_np = abs(np.around(label_np))
+
+        # to unify matrix dimension order between SimpleITK([x,y,z]) and numpy([z,y,x])  (actually it´s the contrary)
+        image_np = np.transpose(image_np, (2, 1, 0))
+        label_np = np.transpose(label_np, (2, 1, 0))
+
+        image_np = image_np[np.newaxis, :, :, :]
+        label_np = label_np[np.newaxis, :, :, :]
+
+        # print(image_np.shape, label_np.shape)
+
         return torch.from_numpy(image_np), torch.from_numpy(label_np)  # this is the final output to feed the network
 
     def __len__(self):
@@ -476,6 +733,8 @@ class NifitDataSet(torch.utils.data.Dataset):
 def Normalization(image):
     """
     Normalize an image to 0 - 255 (8bits)
+    NormalizeImageFilter 通过将其均值设置为零并将方差设置为 1 来标准化图像
+    RescaleIntensityImageFilter 会自动计算原始影像像素值范围，将整个范围以线性转换的方式转换至指定的区间
     """
     normalizeFilter = sitk.NormalizeImageFilter()
     resacleFilter = sitk.RescaleIntensityImageFilter()
@@ -580,7 +839,6 @@ class LaplacianRecursive(object):
         assert isinstance(sigma, (int, float))
         self.sigma = sigma
 
-
     def __call__(self, sample):
         image, label = sample['image'], sample['label']
         filter = sitk.LaplacianRecursiveGaussianImageFilter()
@@ -669,6 +927,53 @@ class Resample(object):
             return {'image': image, 'label': label}
 
 
+class Resize_regression(object):
+
+    def __init__(self, new_size, check):
+        self.name = 'Resize'
+        self.new_size = new_size
+        self.check = check
+
+    def __call__(self, sample):
+        T1_image, T1c_image, T2_image = sample['T1'], sample['T1c'], sample['T2']
+
+        new_size = self.new_size
+        check = self.check
+
+        if check is True:
+            T1_image = resize_image_itk(T1_image, new_size, _interpolator_image)
+            T1c_image = resize_image_itk(T1c_image, new_size, _interpolator_label)
+            T2_image = resize_image_itk(T2_image, new_size, _interpolator_image)
+
+            return {'T1': T1_image, 'T1c': T1c_image, "T2": T2_image}
+
+        if check is False:
+            return {'T1': T1_image, 'T1c': T1c_image, "T2": T2_image}
+
+
+class Resize(object):
+
+    def __init__(self, new_size, check):
+        self.name = 'Resize'
+        self.new_size = new_size
+        self.check = check
+
+    def __call__(self, sample):
+        image, label = sample['image'], sample['label']
+
+        new_size = self.new_size
+        check = self.check
+
+        if check is True:
+            image = resize_image_itk(image, new_size, _interpolator_image)
+            label = resize_image_itk(label, new_size, _interpolator_label)
+
+            return {'image': image, 'label': label}
+
+        if check is False:
+            return {'image': image, 'label': label}
+
+
 class Padding(object):
     """
     Add padding to the image if size is smaller than patch size
@@ -738,7 +1043,6 @@ class Adapt_eq_histogram(object):
         self.name = 'Adapt_eq_histogram'
 
     def __call__(self, sample):
-
         adapt = sitk.AdaptiveHistogramEqualizationImageFilter()
         adapt.SetAlpha(0.7)
         adapt.SetBeta(0.8)
@@ -794,7 +1098,7 @@ class CropBackground(object):
         x_centroid = np.int(centroid[0])
         y_centroid = np.int(centroid[1])
 
-        roiFilter.SetIndex([int(x_centroid-(size_new[0])/2), int(y_centroid-(size_new[1])/2), 0])
+        roiFilter.SetIndex([int(x_centroid - (size_new[0]) / 2), int(y_centroid - (size_new[1]) / 2), 0])
 
         label_crop = roiFilter.Execute(label)
         image_crop = roiFilter.Execute(image)
@@ -899,6 +1203,205 @@ class RandomCrop(object):
         return random.random() <= probability
 
 
+class Augmentation_regression(object):
+    """
+    Application of transforms. This is usually used for data augmentation.
+    List of transforms: random noise
+    """
+
+    def __init__(self):
+        self.name = 'Augmentation_regression'
+
+    def __call__(self, sample):
+
+        choice = np.random.choice([0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+
+        # no augmentation
+        if choice == 0:  # no augmentation
+
+            T1_image, T1c_image, T2_image = sample['T1'], sample['T1c'], sample['T2']
+            return {'T1': T1_image, 'T1c': T1c_image, "T2": T2_image}
+
+        # Additive Gaussian noise
+        if choice == 1:  # Additive Gaussian noise
+
+            mean = np.random.uniform(0, 1)
+            std = np.random.uniform(0, 2)
+            self.noiseFilter = sitk.AdditiveGaussianNoiseImageFilter()
+            self.noiseFilter.SetMean(mean)
+            self.noiseFilter.SetStandardDeviation(std)
+
+            T1_image, T1c_image, T2_image = sample['T1'], sample['T1c'], sample['T2']
+            T1_image = self.noiseFilter.Execute(T1_image)
+            T1c_image = self.noiseFilter.Execute(T1c_image)
+            T2_image = self.noiseFilter.Execute(T2_image)
+
+            return {'T1': T1_image, 'T1c': T1c_image, "T2": T2_image}
+
+        # Recursive Gaussian
+        if choice == 2:  # Recursive Gaussian
+
+            sigma = np.random.uniform(0, 1.5)
+            self.noiseFilter = sitk.RecursiveGaussianImageFilter()
+            self.noiseFilter.SetOrder(0)
+            self.noiseFilter.SetSigma(sigma)
+
+            T1_image, T1c_image, T2_image = sample['T1'], sample['T1c'], sample['T2']
+            T1_image = self.noiseFilter.Execute(T1_image)
+            T1c_image = self.noiseFilter.Execute(T1c_image)
+            T2_image = self.noiseFilter.Execute(T2_image)
+
+            return {'T1': T1_image, 'T1c': T1c_image, "T2": T2_image}
+
+        # Random rotation x y z
+        if choice == 3:  # Random rotation
+
+            theta_x = np.random.randint(-20, 20)
+            theta_y = np.random.randint(-20, 20)
+            theta_z = np.random.randint(-180, 180)
+            T1_image, T1c_image, T2_image = sample['T1'], sample['T1c'], sample['T2']
+
+            T1_image = rotation3d_image(T1_image, theta_x, theta_y, theta_z)
+            T1c_image = rotation3d_label(T1c_image, theta_x, theta_y, theta_z)
+            T2_image = rotation3d_image(T2_image, theta_x, theta_y, theta_z)
+
+            return {'T1': T1_image, 'T1c': T1c_image, "T2": T2_image}
+
+        # BSpline Deformation
+        if choice == 4:  # BSpline Deformation
+
+            randomness = 10
+
+            assert isinstance(randomness, (int, float))
+            if randomness > 0:
+                self.randomness = randomness
+            else:
+                raise RuntimeError('Randomness should be non zero values')
+
+            T1_image, T1c_image, T2_image = sample['T1'], sample['T1c'], sample['T2']
+            spline_order = 3
+            domain_physical_dimensions = [T1_image.GetSize()[0] * T1_image.GetSpacing()[0],
+                                          T1_image.GetSize()[1] * T1_image.GetSpacing()[1],
+                                          T1_image.GetSize()[2] * T1_image.GetSpacing()[2]]
+
+            bspline = sitk.BSplineTransform(3, spline_order)
+            bspline.SetTransformDomainOrigin(T1_image.GetOrigin())
+            bspline.SetTransformDomainDirection(T1_image.GetDirection())
+            bspline.SetTransformDomainPhysicalDimensions(domain_physical_dimensions)
+            bspline.SetTransformDomainMeshSize((10, 10, 10))
+
+            # Random displacement of the control points.
+            originalControlPointDisplacements = np.random.random(len(bspline.GetParameters())) * self.randomness
+            bspline.SetParameters(originalControlPointDisplacements)
+
+            T1_image = sitk.Resample(T1_image, bspline)
+            T1c_image = sitk.Resample(T1c_image, bspline)
+            T2_image = sitk.Resample(T2_image, bspline)
+
+            return {'T1': T1_image, 'T1c': T1c_image, "T2": T2_image}
+
+        # Random flip
+        if choice == 5:  # Random flip
+
+            axes = np.random.choice([0, 1])
+            T1_image, T1c_image, T2_image = sample['T1'], sample['T1c'], sample['T2']
+
+            T1_image = flipit(T1_image, axes)
+            T1c_image = flipit(T1c_image, axes)
+            T2_image = flipit(T2_image, axes)
+
+            return {'T1': T1_image, 'T1c': T1c_image, "T2": T2_image}
+
+        # Brightness
+        if choice == 6:  # Brightness
+
+            T1_image, T1c_image, T2_image = sample['T1'], sample['T1c'], sample['T2']
+
+            T1_image = brightness(T1_image)
+            T1c_image = brightness(T1c_image)
+            T2_image = brightness(T2_image)
+
+            return {'T1': T1_image, 'T1c': T1c_image, "T2": T2_image}
+
+        # Contrast
+        if choice == 7:  # Contrast
+
+            T1_image, T1c_image, T2_image = sample['T1'], sample['T1c'], sample['T2']
+
+            T1_image = contrast(T1_image)
+            T1c_image = contrast(T1c_image)
+            T2_image = contrast(T2_image)
+
+            return {'T1': T1_image, 'T1c': T1c_image, "T2": T2_image}
+
+        # Translate
+        if choice == 8:  # translate
+
+            T1_image, T1c_image, T2_image = sample['T1'], sample['T1c'], sample['T2']
+
+            t1 = np.random.randint(-30, 30)
+            t2 = np.random.randint(-30, 30)
+            offset = [t1, t2]
+
+            T1_image = translateit(T1_image, offset)
+            T1c_image = translateit(T1c_image, offset)
+            T2_image = translateit(T2_image, offset)
+
+            return {'T1': T1_image, 'T1c': T1c_image, "T2": T2_image}
+
+        # Random rotation z
+        if choice == 9:  # Random rotation
+
+            theta_x = 0
+            theta_y = 0
+            theta_z = np.random.randint(-180, 180)
+            T1_image, T1c_image, T2_image = sample['T1'], sample['T1c'], sample['T2']
+
+            T1_image = rotation3d_image(T1_image, theta_x, theta_y, theta_z)
+            T1c_image = rotation3d_image(T1c_image, theta_x, theta_y, theta_z)
+            T2_image = rotation3d_image(T2_image, theta_x, theta_y, theta_z)
+
+            return {'T1': T1_image, 'T1c': T1c_image, "T2": T2_image}
+
+        # Random rotation x
+        if choice == 10:  # Random rotation
+
+            theta_x = np.random.randint(-20, 20)
+            theta_y = 0
+            theta_z = 0
+            T1_image, T1c_image, T2_image = sample['T1'], sample['T1c'], sample['T2']
+
+            T1_image = rotation3d_image(T1_image, theta_x, theta_y, theta_z)
+            T1c_image = rotation3d_label(T1c_image, theta_x, theta_y, theta_z)
+            T2_image = rotation3d_label(T2_image, theta_x, theta_y, theta_z)
+
+            return {'T1': T1_image, 'T1c': T1c_image, "T2": T2_image}
+
+        # Random rotation y
+        if choice == 11:  # Random rotation
+
+            theta_x = 0
+            theta_y = np.random.randint(-20, 20)
+            theta_z = 0
+            T1_image, T1c_image, T2_image = sample['T1'], sample['T1c'], sample['T2']
+
+            T1_image = rotation3d_image(T1_image, theta_x, theta_y, theta_z)
+            T1c_image = rotation3d_label(T1c_image, theta_x, theta_y, theta_z)
+            T2_image = rotation3d_label(T2_image, theta_x, theta_y, theta_z)
+
+            return {'T1': T1_image, 'T1c': T1c_image, "T2": T2_image}
+
+        # histogram gamma
+        if choice == 12:
+            T1_image, T1c_image, T2_image = sample['T1'], sample['T1c'], sample['T2']
+
+            T1_image = imadjust(T1_image)
+            T1c_image = imadjust(T1c_image)
+            T2_image = imadjust(T2_image)
+
+            return {'T1': T1_image, 'T1c': T1c_image, "T2": T2_image}
+
+
 class Augmentation(object):
     """
     Application of transforms. This is usually used for data augmentation.
@@ -945,7 +1448,7 @@ class Augmentation(object):
             image, label = sample['image'], sample['label']
             image = self.noiseFilter.Execute(image)
             if Segmentation is False:
-                label = self.noiseFilter.Execute(label)    # comment for segmentation
+                label = self.noiseFilter.Execute(label)  # comment for segmentation
 
             return {'image': image, 'label': label}
 
@@ -957,8 +1460,8 @@ class Augmentation(object):
             theta_z = np.random.randint(-180, 180)
             image, label = sample['image'], sample['label']
 
-            image = rotation3d_image(image,theta_x,theta_y, theta_z)
-            label = rotation3d_label(label,theta_x,theta_y, theta_z)
+            image = rotation3d_image(image, theta_x, theta_y, theta_z)
+            label = rotation3d_label(label, theta_x, theta_y, theta_z)
 
             return {'image': image, 'label': label}
 
@@ -1022,7 +1525,7 @@ class Augmentation(object):
 
             image = contrast(image)
             if Segmentation is False:
-                label = contrast(label)             # comment for segmentation
+                label = contrast(label)  # comment for segmentation
 
             return {'image': image, 'label': label}
 

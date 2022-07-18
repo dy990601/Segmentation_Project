@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from scipy.ndimage import morphology
+import torch.nn.functional as F
 
 class AvgMeter(object):
     """
